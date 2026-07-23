@@ -6,6 +6,7 @@ type Note struct {
 	ID        int       `json:"id"`
 	Title     string    `json:"title"`
 	Content   string    `json:"content"`
+	Metadata  string    `json:"metadata"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -15,6 +16,7 @@ type NoteWithTags struct {
 	Title     string    `json:"title"`
 	Content   string    `json:"content"`
 	Tags      []string  `json:"tags"`
+	Metadata  string    `json:"metadata"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

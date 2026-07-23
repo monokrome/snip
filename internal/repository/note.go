@@ -14,6 +14,8 @@ import (
 	"github.com/matheuzgomes/Snip/internal/tag"
 )
 
+var ErrInvalidFrontmatter = errors.New("invalid frontmatter")
+
 type NoteRepository interface {
 	Create(note *note.Note) error
 	GetByID(id int) (*note.NoteWithTags, error)
@@ -48,11 +50,11 @@ func (r *repository) Close() error {
 
 func (r *repository) Create(note *note.Note) error {
 	query := `
-		INSERT INTO notes (title, content, created_at, updated_at)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO notes (title, content, metadata, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?)
 	`
 
-	result, err := r.db.Exec(query, note.Title, note.Content, note.CreatedAt, note.UpdatedAt)
+	result, err := r.db.Exec(query, note.Title, note.Content, note.Metadata, note.CreatedAt, note.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -68,7 +70,7 @@ func (r *repository) Create(note *note.Note) error {
 
 func (r *repository) GetByID(id int) (*note.NoteWithTags, error) {
 	query := `
-		SELECT n.id, n.title, n.content, n.created_at, n.updated_at, GROUP_CONCAT(t.name) AS tags
+		SELECT n.id, n.title, n.content, n.metadata, n.created_at, n.updated_at, GROUP_CONCAT(t.name) AS tags
 		FROM notes n
 		LEFT JOIN notes_tags nt ON n.id = nt.note_id
 		LEFT JOIN tags t ON nt.tag_id = t.id
@@ -77,10 +79,15 @@ func (r *repository) GetByID(id int) (*note.NoteWithTags, error) {
 
 	note := &note.NoteWithTags{}
 	var tagsStr sql.NullString
+	var metadata sql.NullString
 
 	err := r.db.QueryRow(query, id).Scan(
-		&note.ID, &note.Title, &note.Content, &note.CreatedAt, &note.UpdatedAt, &tagsStr,
+		&note.ID, &note.Title, &note.Content, &metadata, &note.CreatedAt, &note.UpdatedAt, &tagsStr,
 	)
+
+	if metadata.Valid {
+		note.Metadata = metadata.String
+	}
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -122,7 +129,7 @@ func (r *repository) GetAll(isAsc bool, tagID int) ([]*note.NoteWithTags, error)
 	args := []any{}
 
 	query := `
-		SELECT n.id, n.title, n.content, n.created_at, n.updated_at, GROUP_CONCAT(t.name) AS tags
+		SELECT n.id, n.title, n.content, n.metadata, n.created_at, n.updated_at, GROUP_CONCAT(t.name) AS tags
 		FROM notes n
 		LEFT JOIN notes_tags nt ON n.id = nt.note_id
 		LEFT JOIN tags t ON nt.tag_id = t.id
@@ -147,7 +154,12 @@ func (r *repository) GetAll(isAsc bool, tagID int) ([]*note.NoteWithTags, error)
 	for db.Next() {
 		note := &note.NoteWithTags{}
 		var tagsStr sql.NullString
-		err := db.Scan(&note.ID, &note.Title, &note.Content, &note.CreatedAt, &note.UpdatedAt, &tagsStr)
+		var metadata sql.NullString
+		err := db.Scan(&note.ID, &note.Title, &note.Content, &metadata, &note.CreatedAt, &note.UpdatedAt, &tagsStr)
+
+		if metadata.Valid {
+			note.Metadata = metadata.String
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -168,11 +180,16 @@ func (r *repository) Update(id int, content string, title string) error {
 	var query string
 	var args []any
 
+	metadata, body, ok, yamlErr := note.ParseFrontmatter(content)
+	if !ok {
+		return fmt.Errorf("%w%s", ErrInvalidFrontmatter, note.FrontmatterErr(yamlErr))
+	}
+
 	query = `
         UPDATE notes
-        SET content = ?, updated_at = ?
+        SET content = ?, metadata = ?, updated_at = ?
     `
-	args = []any{content, time.Now()}
+	args = []any{body, metadata, time.Now()}
 
 	if title != "" {
 		query += `, title = ?`
@@ -271,7 +288,7 @@ func (r *repository) Patch(id int, title string) error {
 
 func (r *repository) GetRecent(limit int) ([]*note.NoteWithTags, error) {
 	query := `
-		SELECT n.id, n.title, n.content, n.created_at, n.updated_at, GROUP_CONCAT(t.name) AS tags
+		SELECT n.id, n.title, n.content, n.metadata, n.created_at, n.updated_at, GROUP_CONCAT(t.name) AS tags
 		FROM notes n
 		LEFT JOIN notes_tags nt ON n.id = nt.note_id
 		LEFT JOIN tags t ON nt.tag_id = t.id
@@ -291,7 +308,12 @@ func (r *repository) GetRecent(limit int) ([]*note.NoteWithTags, error) {
 	for db.Next() {
 		note := &note.NoteWithTags{}
 		var tagsStr sql.NullString
-		err := db.Scan(&note.ID, &note.Title, &note.Content, &note.CreatedAt, &note.UpdatedAt, &tagsStr)
+		var metadata sql.NullString
+		err := db.Scan(&note.ID, &note.Title, &note.Content, &metadata, &note.CreatedAt, &note.UpdatedAt, &tagsStr)
+
+		if metadata.Valid {
+			note.Metadata = metadata.String
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -314,6 +336,7 @@ func (r *repository) ExportNotes(exportDir string, since *time.Time, format stri
 			n.id,
 			n.title,
 			n.content,
+			n.metadata,
 			n.created_at,
 			n.updated_at,
 			GROUP_CONCAT(t.name) as tags
@@ -344,12 +367,13 @@ func (r *repository) ExportNotes(exportDir string, since *time.Time, format stri
 			id        int
 			title     string
 			content   string
+			metadata  sql.NullString
 			createdAt time.Time
 			updatedAt time.Time
 			tagsStr   sql.NullString
 		)
 
-		if err := rows.Scan(&id, &title, &content, &createdAt, &updatedAt, &tagsStr); err != nil {
+		if err := rows.Scan(&id, &title, &content, &metadata, &createdAt, &updatedAt, &tagsStr); err != nil {
 			return err
 		}
 
@@ -363,6 +387,7 @@ func (r *repository) ExportNotes(exportDir string, since *time.Time, format stri
 			Title:     title,
 			Content:   content,
 			Tags:      tags,
+			Metadata:  metadata.String,
 			CreatedAt: createdAt,
 			UpdatedAt: updatedAt,
 		}

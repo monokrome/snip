@@ -2,9 +2,12 @@ package handler
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,18 +18,16 @@ import (
 
 	"github.com/mitchellh/go-wordwrap"
 
-	markdown "github.com/MichaelMure/go-term-markdown"
+	"github.com/charmbracelet/glamour"
 )
 
 const lineLimit = 62
 const rowsLimit = 4
-const markdownWidth = 100
-const markdownPad = 2
 
 type Handler interface {
 	CreateNote(title string, message *string, tag *string) error
 	ListNotes(isAsc, verbose bool, tag *string) error
-	GetNote(idStr string, verbose bool, format bool) error
+	GetNote(idStr string, verbose bool, render bool, asJSON bool) error
 	FindNotes(term string) error
 	UpdateNote(idStr string, title string) error
 	DeleteNote(idStr string) error
@@ -65,7 +66,12 @@ func (h *handler) CreateNote(title string, message *string, tag *string) error {
 		return err
 	}
 
-	newNote := note.NewNote(title, contentStr)
+	metadata, body, ok, yamlErr := note.ParseFrontmatter(contentStr)
+	if !ok {
+		return errors.New("invalid frontmatter" + note.FrontmatterErr(yamlErr))
+	}
+	newNote := note.NewNote(title, body)
+	newNote.Metadata = metadata
 	if err := h.noteRepo.Create(newNote); err != nil {
 		return fmt.Errorf("failed to create note: %w", err)
 	}
@@ -140,7 +146,21 @@ func (h *handler) ListNotes(isAsc, verbose bool, tag *string) error {
 	return nil
 }
 
-func (h *handler) GetNote(idStr string, verbose bool, render bool) error {
+func (h *handler) GetNote(idStr string, verbose bool, render bool, asJSON bool) error {
+	if idStr == "" {
+		notes, err := h.noteRepo.GetAll(false, 0)
+		if err != nil {
+			return fmt.Errorf("failed to fetch notes: %w", err)
+		}
+		if asJSON {
+			return h.printNotesJSON(notes)
+		}
+		for _, n := range notes {
+			h.printNote(n, false, false)
+		}
+		return nil
+	}
+
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		return fmt.Errorf("invalid note ID: %s", idStr)
@@ -150,8 +170,50 @@ func (h *handler) GetNote(idStr string, verbose bool, render bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch note -> %w", err)
 	}
-	tags := strings.Join(note.Tags, ", ")
 
+	if asJSON {
+		return h.printNoteJSON(note)
+	}
+
+	h.printNote(note, verbose, render)
+	return nil
+}
+
+func (h *handler) printNoteJSON(note *note.NoteWithTags) error {
+	entry := map[string]any{
+		"id": note.ID, "title": note.Title, "content": note.Content,
+		"tags": note.Tags, "created_at": note.CreatedAt, "updated_at": note.UpdatedAt,
+	}
+	if note.Metadata != "" {
+		var data map[string]any
+		if err := json.Unmarshal([]byte(note.Metadata), &data); err == nil {
+			entry["metadata"] = data
+		}
+	}
+	json.NewEncoder(os.Stdout).Encode(entry)
+	return nil
+}
+
+func (h *handler) printNotesJSON(notes []*note.NoteWithTags) error {
+	enc := json.NewEncoder(os.Stdout)
+	for _, n := range notes {
+		entry := map[string]any{
+			"id": n.ID, "title": n.Title, "content": n.Content,
+			"tags": n.Tags, "created_at": n.CreatedAt, "updated_at": n.UpdatedAt,
+		}
+		if n.Metadata != "" {
+			var data map[string]any
+			if err := json.Unmarshal([]byte(n.Metadata), &data); err == nil {
+				entry["metadata"] = data
+			}
+		}
+		enc.Encode(entry)
+	}
+	return nil
+}
+
+func (h *handler) printNote(note *note.NoteWithTags, verbose bool, render bool) {
+	tags := strings.Join(note.Tags, ", ")
 	fmt.Printf("● #%d %s [%s]\n", note.ID, note.Title, tags)
 
 	if note.Content != "" {
@@ -159,12 +221,11 @@ func (h *handler) GetNote(idStr string, verbose bool, render bool) error {
 			fmt.Println("\n" + renderMarkdownContent(note.Content))
 		} else {
 			lines := strings.Split(strings.TrimRight(wordwrap.WrapString(note.Content, lineLimit), "\n"), "\n")
-			fmt.Printf("  └── ")
-
+			fmt.Printf("  \u2514\u2500\u2500 ")
 			for i, line := range lines {
 				if i != 0 {
 					fmt.Printf("      %s\n", line)
-				} else if i == 0 {
+				} else {
 					fmt.Printf("%s\n", line)
 				}
 			}
@@ -172,11 +233,24 @@ func (h *handler) GetNote(idStr string, verbose bool, render bool) error {
 	}
 
 	if verbose {
-		fmt.Printf("  └─ Created: %s\n", note.CreatedAt.Format(h.dateFormat))
-		fmt.Printf("  └─ Updated: %s\n", note.UpdatedAt.Format(h.dateFormat))
+		fmt.Printf("  \u2514\u2500 Created: %s\n", note.CreatedAt.Format(h.dateFormat))
+		fmt.Printf("  \u2514\u2500 Updated: %s\n", note.UpdatedAt.Format(h.dateFormat))
+		if note.Metadata != "" {
+			fmt.Printf("  \u2514\u2500 Metadata:\n")
+			var meta map[string]any
+			if err := json.Unmarshal([]byte(note.Metadata), &meta); err == nil {
+				keys := make([]string, 0, len(meta))
+				for k := range meta {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					val, _ := json.Marshal(meta[k])
+					fmt.Printf("       \u2514\u2500 %s: %s\n", k, string(val))
+				}
+			}
+		}
 	}
-
-	return nil
 }
 
 func (h *handler) FindNotes(term string) error {
@@ -262,20 +336,32 @@ func (h *handler) UpdateNote(idStr string, title string) error {
 		return fmt.Errorf("failed to fetch note: %w", err)
 	}
 
-	tempFile, err := h.editorHandler.HandleEditor(note.Content)
-	if err != nil {
-		return err
-	}
-	defer h.editorHandler.RemoveTempFile(tempFile)
+	content := note.FullContent()
 
-	content, err := h.editorHandler.ReadTempFile(tempFile)
-	if err != nil {
-		return err
-	}
+	for {
+		tempFile, err := h.editorHandler.HandleEditor(content)
+		if err != nil {
+			return err
+		}
 
-	contentStr := string(content)
-	if err := h.noteRepo.Update(id, contentStr, title); err != nil {
-		return fmt.Errorf("failed to update note: %w", err)
+		raw, err := h.editorHandler.ReadTempFile(tempFile)
+		h.editorHandler.RemoveTempFile(tempFile)
+		if err != nil {
+			return err
+		}
+
+		contentStr := string(raw)
+		err = h.noteRepo.Update(id, contentStr, title)
+		if errors.Is(err, repository.ErrInvalidFrontmatter) {
+			fmt.Printf("Error: %v\n", err)
+			content = contentStr
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("failed to update note: %w", err)
+		}
+
+		break
 	}
 
 	fmt.Printf("Note updated successfully!\n")
@@ -478,8 +564,14 @@ func (h *handler) ImportNotes(importDir string) error {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 
-		note := note.NewNote(strings.TrimSuffix(file.Name(), ".md"), string(content))
-		if err := h.noteRepo.Create(note); err != nil {
+		contentStr := string(content)
+		metadata, body, ok, yamlErr := note.ParseFrontmatter(contentStr)
+		if !ok {
+			return errors.New("invalid frontmatter" + note.FrontmatterErr(yamlErr))
+		}
+		newNote := note.NewNote(strings.TrimSuffix(file.Name(), ".md"), body)
+		newNote.Metadata = metadata
+		if err := h.noteRepo.Create(newNote); err != nil {
 			return fmt.Errorf("failed to create note: %w", err)
 		}
 	}
@@ -554,5 +646,9 @@ func parseSinceFilter(since string) (time.Time, error) {
 }
 
 func renderMarkdownContent(content string) string {
-	return string(markdown.Render(content, markdownWidth, markdownPad))
+	out, err := glamour.Render(content, "dark")
+	if err != nil {
+		return content
+	}
+	return out
 }

@@ -86,7 +86,7 @@ func TestGetNote(t *testing.T) {
 			h, mockNoteRepo, mockTagRepo := createTestHandler()
 			tt.setupMocks(mockNoteRepo, mockTagRepo)
 
-			err := h.GetNote(tt.idStr, tt.verbose, tt.render)
+			err := h.GetNote(tt.idStr, tt.verbose, tt.render, false)
 
 			if tt.expectError {
 				if err == nil {
@@ -111,7 +111,7 @@ func TestGetNote_EdgeCases(t *testing.T) {
 		mockNoteRepo.err = nil
 		mockNoteRepo.notesWithTags = createTestNotes()
 
-		err := h.GetNote("-1", false, false)
+		err := h.GetNote("-1", false, false, false)
 
 		if err == nil {
 			t.Errorf("Expected error for negative ID, got none")
@@ -123,7 +123,7 @@ func TestGetNote_EdgeCases(t *testing.T) {
 		mockNoteRepo.err = nil
 		mockNoteRepo.notesWithTags = createTestNotes()
 
-		err := h.GetNote("0", false, false)
+		err := h.GetNote("0", false, false, false)
 
 		if err == nil {
 			t.Errorf("Expected error for zero ID, got none")
@@ -139,7 +139,7 @@ func BenchmarkGetNote(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		err := h.GetNote("1", false, false)
+		err := h.GetNote("1", false, false, false)
 		if err != nil {
 			b.Fatalf("GetNote failed: %v", err)
 		}

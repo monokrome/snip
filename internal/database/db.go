@@ -60,6 +60,34 @@ var migrations = []migration{
 				DELETE FROM notes_fts WHERE id = old.id;
 			END;
 		`,
+		},
+	{
+		version: 2,
+		query: `
+			ALTER TABLE notes ADD COLUMN metadata TEXT NOT NULL DEFAULT '';
+
+			DROP TABLE IF EXISTS notes_fts;
+			DROP TRIGGER IF EXISTS notes_fts_ai;
+			DROP TRIGGER IF EXISTS notes_fts_au;
+			DROP TRIGGER IF EXISTS notes_fts_ad;
+
+			CREATE VIRTUAL TABLE notes_fts USING fts4(id, title, content, metadata);
+
+			INSERT INTO notes_fts(id, title, content, metadata)
+			SELECT id, title, content, metadata FROM notes;
+
+			CREATE TRIGGER notes_fts_ai AFTER INSERT ON notes BEGIN
+				INSERT INTO notes_fts(id, title, content, metadata) VALUES (new.id, new.title, new.content, new.metadata);
+			END;
+
+			CREATE TRIGGER notes_fts_au AFTER UPDATE ON notes BEGIN
+				UPDATE notes_fts SET title = new.title, content = new.content, metadata = new.metadata WHERE id = old.id;
+			END;
+
+			CREATE TRIGGER notes_fts_ad AFTER DELETE ON notes BEGIN
+				DELETE FROM notes_fts WHERE id = old.id;
+			END;
+		`,
 	},
 }
 
